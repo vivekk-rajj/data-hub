@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
+const rateLimit = require('express-rate-limit');
 const Post = require('./models/Post');
 
 dotenv.config();
@@ -9,6 +10,16 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(express.json());
+
+const postsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many requests, please try again later.' }
+});
+
+app.use('/posts', postsLimiter);
 
 app.use((req, res, next) => {
   const now = new Date();
@@ -24,6 +35,16 @@ app.use((req, res, next) => {
 
 const asyncHandler = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
+
+const buildPostUpdate = (body) => {
+  const update = {};
+
+  if (typeof body.title !== 'undefined') update.title = body.title;
+  if (typeof body.content !== 'undefined') update.content = body.content;
+  if (typeof body.authorId !== 'undefined') update.authorId = body.authorId;
+
+  return update;
+};
 
 app.get(
   '/posts',
@@ -93,7 +114,15 @@ app.put(
   '/posts/:id',
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const updatedPost = await Post.findByIdAndUpdate(id, req.body, {
+    const updatePayload = buildPostUpdate(req.body);
+
+    if (Object.keys(updatePayload).length === 0) {
+      return res.status(400).json({
+        message: 'At least one of title, content, or authorId is required for update'
+      });
+    }
+
+    const updatedPost = await Post.findByIdAndUpdate(id, updatePayload, {
       new: true,
       runValidators: true
     }).populate('authorId');

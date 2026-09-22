@@ -1,8 +1,12 @@
 const express = require('express');
-const app = express();
-const PORT = 5000;
+const mongoose = require('mongoose');
+const dotenv = require('dotenv');
+const Post = require('./models/Post');
 
-let blogPosts = [];
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 5000;
 
 app.use(express.json());
 
@@ -18,80 +22,109 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/posts', (req, res) => {
-  return res.status(200).json({
-    message: 'Posts retrieved successfully',
-    count: blogPosts.length,
-    data: blogPosts
-  });
-});
+const asyncHandler = (handler) => (req, res, next) =>
+  Promise.resolve(handler(req, res, next)).catch(next);
 
-app.get('/posts/:id', (req, res) => {
-  const { id } = req.params;
-  const post = blogPosts.find((item) => item.id === id);
+app.get(
+  '/posts',
+  asyncHandler(async (req, res) => {
+    const posts = await Post.find().populate('authorId');
 
-  if (!post) {
-    return res.status(404).json({ message: `Post with id ${id} not found` });
-  }
+    return res.status(200).json({
+      message: 'Posts retrieved successfully',
+      count: posts.length,
+      data: posts
+    });
+  })
+);
 
-  return res.status(200).json({
-    message: 'Post retrieved successfully',
-    data: post
-  });
-});
+app.get(
+  '/posts/top/recent',
+  asyncHandler(async (req, res) => {
+    const posts = await Post.find()
+      .sort({ createdAt: -1 })
+      .limit(3)
+      .populate('authorId');
 
-app.post('/posts', (req, res) => {
-  const newPost = {
-    id: req.body.id || Date.now().toString(),
-    title: req.body.title || 'Untitled Post',
-    content: req.body.content || '',
-    author: req.body.author || 'Anonymous',
-    createdAt: new Date().toISOString()
-  };
+    return res.status(200).json({
+      message: 'Recent posts retrieved successfully',
+      count: posts.length,
+      data: posts
+    });
+  })
+);
 
-  blogPosts.push(newPost);
+app.get(
+  '/posts/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const post = await Post.findById(id).populate('authorId');
 
-  return res.status(201).json({
-    message: 'Post created successfully',
-    data: newPost
-  });
-});
+    if (!post) {
+      return res.status(404).json({ message: `Post with id ${id} not found` });
+    }
 
-app.put('/posts/:id', (req, res) => {
-  const { id } = req.params;
-  const index = blogPosts.findIndex((post) => post.id === id);
+    return res.status(200).json({
+      message: 'Post retrieved successfully',
+      data: post
+    });
+  })
+);
 
-  if (index === -1) {
-    return res.status(404).json({ message: `Post with id ${id} not found` });
-  }
+app.post(
+  '/posts',
+  asyncHandler(async (req, res) => {
+    const newPost = await Post.create({
+      title: req.body.title,
+      content: req.body.content,
+      authorId: req.body.authorId
+    });
 
-  blogPosts[index] = {
-    ...blogPosts[index],
-    ...req.body,
-    updatedAt: new Date().toISOString()
-  };
+    const createdPost = await Post.findById(newPost._id).populate('authorId');
 
-  return res.status(200).json({
-    message: 'Post updated successfully',
-    data: blogPosts[index]
-  });
-});
+    return res.status(201).json({
+      message: 'Post created successfully',
+      data: createdPost
+    });
+  })
+);
 
-app.delete('/posts/:id', (req, res) => {
-  const { id } = req.params;
-  const initialLength = blogPosts.length;
+app.put(
+  '/posts/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const updatedPost = await Post.findByIdAndUpdate(id, req.body, {
+      new: true,
+      runValidators: true
+    }).populate('authorId');
 
-  blogPosts = blogPosts.filter((post) => post.id !== id);
+    if (!updatedPost) {
+      return res.status(404).json({ message: `Post with id ${id} not found` });
+    }
 
-  if (blogPosts.length === initialLength) {
-    return res.status(404).json({ message: `Post with id ${id} not found` });
-  }
+    return res.status(200).json({
+      message: 'Post updated successfully',
+      data: updatedPost
+    });
+  })
+);
 
-  return res.status(200).json({
-    message: 'Post deleted successfully',
-    deletedId: id
-  });
-});
+app.delete(
+  '/posts/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const deletedPost = await Post.findByIdAndDelete(id);
+
+    if (!deletedPost) {
+      return res.status(404).json({ message: `Post with id ${id} not found` });
+    }
+
+    return res.status(200).json({
+      message: 'Post deleted successfully',
+      deletedId: id
+    });
+  })
+);
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
@@ -110,6 +143,45 @@ app.post('/login', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`The Data Hub server is running on http://localhost:${PORT}`);
+app.use((error, req, res, next) => {
+  if (error.name === 'ValidationError') {
+    return res.status(400).json({
+      message: 'Validation failed',
+      error: error.message
+    });
+  }
+
+  if (error.name === 'CastError') {
+    return res.status(400).json({
+      message: 'Invalid post id format'
+    });
+  }
+
+  console.error('Unexpected server error:', error);
+
+  return res.status(500).json({
+    message: 'Internal server error'
+  });
 });
+
+const startServer = async () => {
+  try {
+    if (!process.env.MONGO_URI) {
+      throw new Error('MONGO_URI is not defined in environment variables');
+    }
+
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log('Connected to MongoDB Atlas successfully');
+
+    app.listen(PORT, () => {
+      console.log(`The Data Hub server is running on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error(`Failed to start server: ${error.message}`);
+    process.exit(1);
+  }
+};
+
+startServer();
+
+module.exports = app;

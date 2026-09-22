@@ -1,10 +1,25 @@
 const express = require('express');
-const app = express();
-const PORT = 5000;
+const mongoose = require('mongoose');
+const dotenv = require('dotenv');
+const rateLimit = require('express-rate-limit');
+const Post = require('./models/Post');
 
-let blogPosts = [];
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 5000;
 
 app.use(express.json());
+
+const postsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many requests, please try again later.' }
+});
+
+app.use('/posts', postsLimiter);
 
 app.use((req, res, next) => {
   const now = new Date();
@@ -18,80 +33,127 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/posts', (req, res) => {
-  return res.status(200).json({
-    message: 'Posts retrieved successfully',
-    count: blogPosts.length,
-    data: blogPosts
-  });
-});
+const asyncHandler = (handler) => (req, res, next) =>
+  Promise.resolve(handler(req, res, next)).catch(next);
 
-app.get('/posts/:id', (req, res) => {
-  const { id } = req.params;
-  const post = blogPosts.find((item) => item.id === id);
+const buildPostUpdate = (body) => {
+  const update = {};
 
-  if (!post) {
-    return res.status(404).json({ message: `Post with id ${id} not found` });
-  }
+  if (typeof body.title !== 'undefined') update.title = body.title;
+  if (typeof body.content !== 'undefined') update.content = body.content;
+  if (typeof body.authorId !== 'undefined') update.authorId = body.authorId;
 
-  return res.status(200).json({
-    message: 'Post retrieved successfully',
-    data: post
-  });
-});
+  return update;
+};
 
-app.post('/posts', (req, res) => {
-  const newPost = {
-    id: req.body.id || Date.now().toString(),
-    title: req.body.title || 'Untitled Post',
-    content: req.body.content || '',
-    author: req.body.author || 'Anonymous',
-    createdAt: new Date().toISOString()
-  };
+app.get(
+  '/posts',
+  asyncHandler(async (req, res) => {
+    const posts = await Post.find().populate('authorId');
 
-  blogPosts.push(newPost);
+    return res.status(200).json({
+      message: 'Posts retrieved successfully',
+      count: posts.length,
+      data: posts
+    });
+  })
+);
 
-  return res.status(201).json({
-    message: 'Post created successfully',
-    data: newPost
-  });
-});
+app.get(
+  '/posts/top/recent',
+  asyncHandler(async (req, res) => {
+    const posts = await Post.find()
+      .sort({ createdAt: -1 })
+      .limit(3)
+      .populate('authorId');
 
-app.put('/posts/:id', (req, res) => {
-  const { id } = req.params;
-  const index = blogPosts.findIndex((post) => post.id === id);
+    return res.status(200).json({
+      message: 'Recent posts retrieved successfully',
+      count: posts.length,
+      data: posts
+    });
+  })
+);
 
-  if (index === -1) {
-    return res.status(404).json({ message: `Post with id ${id} not found` });
-  }
+app.get(
+  '/posts/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const post = await Post.findById(id).populate('authorId');
 
-  blogPosts[index] = {
-    ...blogPosts[index],
-    ...req.body,
-    updatedAt: new Date().toISOString()
-  };
+    if (!post) {
+      return res.status(404).json({ message: `Post with id ${id} not found` });
+    }
 
-  return res.status(200).json({
-    message: 'Post updated successfully',
-    data: blogPosts[index]
-  });
-});
+    return res.status(200).json({
+      message: 'Post retrieved successfully',
+      data: post
+    });
+  })
+);
 
-app.delete('/posts/:id', (req, res) => {
-  const { id } = req.params;
-  const initialLength = blogPosts.length;
+app.post(
+  '/posts',
+  asyncHandler(async (req, res) => {
+    const newPost = await Post.create({
+      title: req.body.title,
+      content: req.body.content,
+      authorId: req.body.authorId
+    });
 
-  blogPosts = blogPosts.filter((post) => post.id !== id);
+    const createdPost = await Post.findById(newPost._id).populate('authorId');
 
-  if (blogPosts.length === initialLength) {
-    return res.status(404).json({ message: `Post with id ${id} not found` });
-  }
+    return res.status(201).json({
+      message: 'Post created successfully',
+      data: createdPost
+    });
+  })
+);
 
-  return res.status(200).json({
-    message: 'Post deleted successfully',
-    deletedId: id
-  });
-});
+app.put(
+  '/posts/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const updatePayload = buildPostUpdate(req.body);
+
+    if (Object.keys(updatePayload).length === 0) {
+      return res.status(400).json({
+        message: 'At least one of title, content, or authorId is required for update'
+      });
+    }
+
+    const updatedPost = await Post.findByIdAndUpdate(id, updatePayload, {
+      new: true,
+      runValidators: true
+    }).populate('authorId');
+
+    if (!updatedPost) {
+      return res.status(404).json({ message: `Post with id ${id} not found` });
+    }
+
+    return res.status(200).json({
+      message: 'Post updated successfully',
+      data: updatedPost
+    });
+  })
+);
+
+app.delete(
+  '/posts/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const deletedPost = await Post.findByIdAndDelete(id);
+
+    if (!deletedPost) {
+      return res.status(404).json({ message: `Post with id ${id} not found` });
+    }
+
+    return res.status(200).json({
+      message: 'Post deleted successfully',
+      deletedId: id
+    });
+  })
+);
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
@@ -110,6 +172,45 @@ app.post('/login', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`The Data Hub server is running on http://localhost:${PORT}`);
+app.use((error, req, res, next) => {
+  if (error.name === 'ValidationError') {
+    return res.status(400).json({
+      message: 'Validation failed',
+      error: error.message
+    });
+  }
+
+  if (error.name === 'CastError') {
+    return res.status(400).json({
+      message: 'Invalid post id format'
+    });
+  }
+
+  console.error('Unexpected server error:', error);
+
+  return res.status(500).json({
+    message: 'Internal server error'
+  });
 });
+
+const startServer = async () => {
+  try {
+    if (!process.env.MONGO_URI) {
+      throw new Error('MONGO_URI is not defined in environment variables');
+    }
+
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log('Connected to MongoDB Atlas successfully');
+
+    app.listen(PORT, () => {
+      console.log(`The Data Hub server is running on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error(`Failed to start server: ${error.message}`);
+    process.exit(1);
+  }
+};
+
+startServer();
+
+module.exports = app;
